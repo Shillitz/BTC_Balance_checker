@@ -1,8 +1,8 @@
 # BTC_Balance_checker
-Python script to check bulk addresses for balances from your own Bitcoin node
+Python script to check bulk addresses for balances from your own Bitcoin node.
 Simply change the Rpc login details for your RPC access in the python file.
-You need to be running your own full node or have RPC access to one
-Pruned nodes will not work correctly
+You need to be running your own full node or have RPC access to one.
+Pruned nodes will not work correctly!
 
 This is a really fastest way to check bulk lists!
 

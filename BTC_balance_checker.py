@@ -2,6 +2,8 @@ from bitcoinrpc.authproxy import AuthServiceProxy, JSONRPCException
 from bitcoinaddress import Address
 import time
 import pandas as pd
+import http.client
+import socket
 
 # Function to read Bitcoin addresses from a text file
 def read_addresses(file_path):
@@ -16,27 +18,56 @@ def read_addresses(file_path):
         print(f"Error reading file: {e}")
         return []
 
-# Function to connect to Bitcoin Core RPC
-def connect_to_rpc():
+# Function to connect to Bitcoin Core RPC with retry
+def connect_to_rpc(max_retries=3, retry_delay=5):
+    for attempt in range(max_retries):
+        try:
+            # Replace with your RPC credentials and host/port
+            rpc_user = "changehere"
+            rpc_password = "changehere"
+            rpc_host = "127.0.0.1"
+            rpc_port = 8332
+            rpc_url = f"http://{rpc_user}:{rpc_password}@{rpc_host}:{rpc_port}"
+            # Timeout set to 120 seconds for large UTXO scans
+            return AuthServiceProxy(rpc_url, timeout=120)
+        except Exception as e:
+            print(f"Error connecting to Bitcoin RPC (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+    return None
+
+# Function to check if node is pruned
+def check_pruned_node(rpc_connection):
     try:
-        # Replace with your RPC credentials and host/port
-        rpc_user = "your_rpc_username"
-        rpc_password = "your_rpc_password"
-        rpc_host = "127.0.0.1"
-        rpc_port = 8332
-        rpc_url = f"http://{rpc_user}:{rpc_password}@{rpc_host}:{rpc_port}"
-        return AuthServiceProxy(rpc_url)
+        blockchain_info = rpc_connection.getblockchaininfo()
+        if blockchain_info.get('pruned', False):
+            print("WARNING: Node is pruned, which prevents accurate balance reporting for historical addresses (e.g., genesis block address 1HLoD9E4SDFFPDiYfNYnkBLQ85Y51J3Zb1).")
+            print("To fix, set 'prune=0' in bitcoin.conf, delete blockchain data (keep wallet.dat), and resync the node.")
+            print("Resyncing a non-pruned node may take hours/days depending on hardware.")
+            return True
+        return False
     except Exception as e:
-        print(f"Error connecting to Bitcoin RPC: {e}")
-        return None
+        print(f"Error checking pruned status: {e}")
+        return False
 
 # Function to convert address to legacy (P2PKH) format
 def convert_to_legacy(address, rpc_connection):
+    addr_type = "Unknown"  # Initialize to avoid UnboundLocalError
     try:
-        # Validate address using RPC
-        validation = rpc_connection.validateaddress(address)
+        # Validate address using RPC with retry
+        for attempt in range(3):
+            try:
+                validation = rpc_connection.validateaddress(address)
+                break
+            except (JSONRPCException, http.client.HTTPException, socket.timeout) as e:
+                print(f"validateaddress error for {address} (attempt {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    time.sleep(5)
+                else:
+                    return None, f"Validation error: {e}", addr_type
+        
         if not validation['isvalid']:
-            return None, "Invalid address", "Unknown"
+            return None, "Invalid address", addr_type
         
         # Determine address type from scriptPubKey
         scriptpubkey = validation.get('scriptPubKey', '')
@@ -72,32 +103,69 @@ def convert_to_legacy(address, rpc_connection):
         return None, f"Conversion error: {e}", addr_type
 
 # Function to check balance for a single Bitcoin address
-def check_balance(rpc_connection, address, addr_type):
+def check_balance(rpc_connection, address):
     try:
         # Validate address first
         validation = rpc_connection.validateaddress(address)
         if not validation['isvalid']:
             return None, "Invalid address"
         
-        # Try importing address (for legacy wallets, only P2PKH should be passed)
-        try:
-            rpc_connection.importaddress(address, "", False)
-        except JSONRPCException as e:
-            if "Only legacy wallets are supported" in str(e):
-                print(f"Legacy wallet error for {address}: {e}. Attempting balance check without import.")
-                try:
-                    utxos = rpc_connection.listunspent(0, 9999999, [address])
-                    balance_satoshis = sum(utxo['amount'] * 100_000_000 for utxo in utxos)
-                    return balance_satoshis / 100_000_000, None
-                except JSONRPCException as e2:
-                    return None, f"Fallback failed: {e2}"
-            else:
-                return None, f"RPC error: {e}"
+        # Special handling for genesis address
+        if address == "1HLoD9E4SDFFPDiYfNYnkBLQ85Y51J3Zb1":
+            total_balance = 0.0
+            balance_error = None
+            try:
+                # Check genesis block coinbase transaction
+                genesis_txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+                genesis_block = rpc_connection.getblockhash(0)
+                tx = rpc_connection.getrawtransaction(genesis_txid, 1, genesis_block)
+                for vout in tx['vout']:
+                    if vout['scriptPubKey'].get('addresses', [None])[0] == address:
+                        total_balance += vout['value']
+                        print(f"Found genesis UTXO: {vout['value']:.8f} BTC (txid: {genesis_txid}, vout: {vout['n']})")
+                # Also check other UTXOs with scantxoutset
+                result = rpc_connection.scantxoutset("start", [{"desc": f"addr({address})"}])
+                if result['success']:
+                    utxos = result.get('unspents', [])
+                    total_balance += result['total_amount']
+                    print(f"Found {len(utxos)} additional UTXOs for {address}, total: {result['total_amount']} BTC")
+                    if utxos:
+                        print("Additional UTXO details:", [{"txid": utxo['txid'], "vout": utxo['vout'], "amount": f"{utxo['amount']:.8f} BTC"} for utxo in utxos])
+                    else:
+                        print("No additional UTXOs found.")
+                    rpc_connection.scantxoutset("abort", [])  # Clean up
+                    if total_balance == result['total_amount']:
+                        print("Warning: Genesis UTXO (50 BTC) not included in scantxoutset, likely due to Bitcoin Core excluding unspendable UTXOs.")
+                    return total_balance, None
+                else:
+                    print("scantxoutset failed to find additional UTXOs, relying on genesis transaction.")
+                    return total_balance, None
+            except (JSONRPCException, http.client.HTTPException, socket.timeout) as e:
+                print(f"Genesis transaction check error for {address}: {e}")
+                balance_error = f"Genesis check failed: {e}"
         
-        # Get unspent transaction outputs (UTXOs)
-        utxos = rpc_connection.listunspent(0, 9999999, [address])
-        balance_satoshis = sum(utxo['amount'] * 100_000_000 for utxo in utxos)
-        return balance_satoshis / 100_000_000, None
+        # Use scantxoutset for other addresses
+        for attempt in range(3):
+            try:
+                result = rpc_connection.scantxoutset("start", [{"desc": f"addr({address})"}])
+                if result['success']:
+                    utxos = result.get('unspents', [])
+                    balance_satoshis = int(result['total_amount'] * 100_000_000)
+                    print(f"Found {len(utxos)} UTXOs for {address}, total: {result['total_amount']} BTC")
+                    if utxos:
+                        print("UTXO details:", [{"txid": utxo['txid'], "vout": utxo['vout'], "amount": f"{utxo['amount']:.8f} BTC"} for utxo in utxos])
+                    else:
+                        print("No UTXOs found.")
+                    rpc_connection.scantxoutset("abort", [])  # Clean up
+                    return balance_satoshis / 100_000_000, None
+                else:
+                    return None, "scantxoutset failed to find UTXOs"
+            except (JSONRPCException, http.client.HTTPException, socket.timeout) as e:
+                print(f"scantxoutset error for {address} (attempt {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    time.sleep(5)
+                else:
+                    return None, f"scantxoutset failed: {e}"
     except JSONRPCException as e:
         return None, f"RPC error: {e}"
     except Exception as e:
@@ -163,4 +231,50 @@ def main():
     # Connect to Bitcoin RPC
     rpc_connection = connect_to_rpc()
     if not rpc_connection:
-        print("Failed to connect to Bitcoin
+        print("Failed to connect to Bitcoin node. Exiting.")
+        return
+    
+    # Check if node is pruned
+    check_pruned_node(rpc_connection)
+    
+    print("Converting addresses to legacy format and checking balances...")
+    print("-" * 50)
+    
+    legacy_addresses = []
+    balances = []
+    balance_errors = []
+    statuses = []
+    addr_types = []
+    
+    for address in addresses:
+        # Convert to legacy format
+        legacy_address, status, addr_type = convert_to_legacy(address, rpc_connection)
+        legacy_addresses.append(legacy_address)
+        statuses.append(status)
+        addr_types.append(addr_type)
+        
+        # Check balance using legacy address if available, otherwise skip
+        balance = None
+        balance_error = None
+        if legacy_address:
+            balance, balance_error = check_balance(rpc_connection, legacy_address)
+        else:
+            balance_error = "Skipped due to conversion failure"
+            print(f"Skipping balance check for {address} due to conversion failure")
+        
+        balances.append(balance)
+        balance_errors.append(balance_error)
+        
+        print(f"Original Address: {address}")
+        print(f"Address Type: {addr_type}")
+        print(f"Legacy Address: {legacy_address if legacy_address else 'N/A'}")
+        print(f"Balance: {balance:.8f} BTC" if balance is not None else f"Balance: Unable to retrieve ({balance_error})")
+        print(f"Conversion Status: {status}")
+        print("-" * 50)
+        time.sleep(0.2)  # Increased delay to avoid overloading node
+    
+    # Save results and print summary
+    save_results(addresses, legacy_addresses, balances, balance_errors, addr_types, statuses)
+
+if __name__ == "__main__":
+    main()

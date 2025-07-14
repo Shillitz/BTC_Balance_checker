@@ -21,9 +21,10 @@ Also pip install pyopencl python-bitcoinrpc bitcoinaddress pandas numpy base58
 
 Ensure you have an address list file. Test one included.
 
+Batch size is set to 1000 but you can change to whatever your system can handle.
 
 To do
-speed up further optimise.
+speed up and further optimise.
 
 bitcoin tips accepted here
 16w9ywEv1bkyGyfriZYSj5msrkxc2e9CLD

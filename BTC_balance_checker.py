@@ -374,7 +374,7 @@ def main():
     
     # Check balances in batches sequentially edit batch size depending on your system
     if valid_addresses:
-        batch_size = 500
+        batch_size = 1000
         batches = [valid_addresses[i:i + batch_size] for i in range(0, len(valid_addresses), batch_size)]
         print(f"Processing {len(batches)} batches of up to {batch_size} addresses sequentially...")
         

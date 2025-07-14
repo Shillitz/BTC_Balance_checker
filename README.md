@@ -11,17 +11,29 @@ Uses GPU to validate addresses (AMD only) Will fall back to CPU if not possible 
 Ensure bitcoin.conf has:
 
 rpcuser=your_rpc_username
+
 rpcpassword=your_rpc_password
+
 rpcallowip=127.0.0.1
+
 rpcbind=127.0.0.1
+
 rpcport=8332
+
 rpcworkqueue=256     # Increased for heavy scantxoutset load
+
 rpcthreads=128       # More threads for RPC handling
+
 rpctimeout=300       # Increased timeout for slow operations
+
 prune=0              # Must be non-pruned
+
 dbcache=8192         # 8GB cache (adjust to 4096 if <16GB RAM)
+
 maxmempool=2000      # Larger mempool
+
 server=1
+
 txindex=1            # Optional, speeds up lookups (requires reindex)
 
 Also pip install pyopencl python-bitcoinrpc bitcoinaddress pandas numpy base58

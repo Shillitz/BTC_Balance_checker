@@ -15,7 +15,10 @@ def read_addresses(file_path):
     try:
         with open(file_path, 'r') as file:
             addresses = [line.strip() for line in file if line.strip()]
-        return addresses
+            if not addresses:
+                print(f"Error: {file_path} is empty or contains no valid addresses.")
+                return []
+            return addresses
     except FileNotFoundError:
         print(f"Error: File {file_path} not found.")
         return []
@@ -119,14 +122,14 @@ def opencl_validate_addresses(addresses, platform_id=0):
 def convert_to_legacy(address, rpc_connection):
     addr_type = "Unknown"
     try:
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 validation = rpc_connection.validateaddress(address)
                 break
-            except (JSONRPCException, http.client.HTTPException, socket.timeout) as e:
-                print(f"validateaddress error for {address} (attempt {attempt + 1}/3): {e}")
-                if attempt < 2:
-                    time.sleep(2)
+            except (JSONRPCException, http.client.HTTPException, socket.timeout, ConnectionResetError) as e:
+                print(f"validateaddress error for {address} (attempt {attempt + 1}/5): {e}")
+                if attempt < 4:
+                    time.sleep(3)
                 else:
                     return None, f"Validation error: {e}", addr_type, None
         
@@ -163,15 +166,15 @@ def convert_to_legacy(address, rpc_connection):
         return None, f"Conversion error: {e}", addr_type, None
 
 # Function to connect to Bitcoin Core RPC with retry
-def connect_to_rpc(max_retries=3, retry_delay=2):
+def connect_to_rpc(max_retries=5, retry_delay=3):
     for attempt in range(max_retries):
         try:
-            rpc_user = "your_rpc_username"
-            rpc_password = "your_rpc_password"
+            rpc_user = "yourusernameher"
+            rpc_password = "yourpasswordhere"
             rpc_host = "127.0.0.1"
             rpc_port = 8332
             rpc_url = f"http://{rpc_user}:{rpc_password}@{rpc_host}:{rpc_port}"
-            return AuthServiceProxy(rpc_url, timeout=120)
+            return AuthServiceProxy(rpc_url, timeout=300)
         except Exception as e:
             print(f"Error connecting to Bitcoin RPC (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
@@ -191,9 +194,30 @@ def check_pruned_node(rpc_connection):
         print(f"Error checking pruned status: {e}")
         return False
 
+# Function to check scantxoutset status and abort if needed
+def ensure_scantxoutset_ready(rpc_connection):
+    try:
+        for attempt in range(5):
+            status = rpc_connection.scantxoutset("status", [])
+            if status and status.get('progress') is not None:
+                print(f"scantxoutset in progress (progress: {status['progress']:.2f}%). Aborting...")
+                rpc_connection.scantxoutset("abort", [])
+                time.sleep(1)  # Wait for abort to complete
+            else:
+                return True
+        print("Failed to abort scantxoutset after 5 attempts.")
+        return False
+    except (JSONRPCException, http.client.HTTPException, socket.timeout, ConnectionResetError) as e:
+        print(f"Error checking scantxoutset status: {e}")
+        return False
+
 # Function to check balances for a batch of addresses
 def check_balance_batch(rpc_connection, addresses):
     try:
+        # Ensure no scan is in progress
+        if not ensure_scantxoutset_ready(rpc_connection):
+            return {addr: 0.0 for addr in addresses}, {addr: "Failed to ensure scantxoutset is ready" for addr in addresses}
+        
         # Prepare batch descriptors
         descriptors = [{"desc": f"addr({addr})"} for addr in addresses]
         genesis_address = "1HLoD9E4SDFFPDiYfNYnkBLQ85Y51J3Zb1"
@@ -207,7 +231,7 @@ def check_balance_batch(rpc_connection, addresses):
             balances[genesis_address] = 50.0
             print(f"Added genesis UTXO for {genesis_address}: 50.00000000 BTC (hardcoded due to Bitcoin Core limitation)")
         
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 result = rpc_connection.scantxoutset("start", descriptors)
                 if result['success']:
@@ -237,10 +261,10 @@ def check_balance_batch(rpc_connection, addresses):
                 else:
                     print(f"scantxoutset failed for batch")
                     return balances, {addr: "scantxoutset failed to find UTXOs" for addr in addresses}
-            except (JSONRPCException, http.client.HTTPException, socket.timeout) as e:
-                print(f"scantxoutset error for batch (attempt {attempt + 1}/3): {e}")
-                if attempt < 2:
-                    time.sleep(2)
+            except (JSONRPCException, http.client.HTTPException, socket.timeout, ConnectionResetError) as e:
+                print(f"scantxoutset error for batch (attempt {attempt + 1}/5): {e}")
+                if attempt < 4:
+                    time.sleep(3)
                 else:
                     return balances, {addr: f"scantxoutset failed: {e}" for addr in addresses}
     except JSONRPCException as e:
@@ -342,17 +366,19 @@ def main():
         if scriptpubkey:
             print(f"ScriptPubKey: {scriptpubkey}")
         print("-" * 50)
-        time.sleep(0.05)
+        time.sleep(0.01)
     
     # Initialize balances and errors for all addresses
     balances = [0.0] * len(addresses)
     balance_errors = ["Skipped due to conversion failure"] * len(addresses)
     
-    # Check balances in batches
+    # Check balances in batches sequentially edit batch size depending on your system
     if valid_addresses:
-        batch_size = 1000
-        for i in range(0, len(valid_addresses), batch_size):
-            batch = valid_addresses[i:i + batch_size]
+        batch_size = 500
+        batches = [valid_addresses[i:i + batch_size] for i in range(0, len(valid_addresses), batch_size)]
+        print(f"Processing {len(batches)} batches of up to {batch_size} addresses sequentially...")
+        
+        for batch in batches:
             print(f"Processing batch of {len(batch)} addresses...")
             batch_balances, batch_errors = check_balance_batch(rpc_connection, batch)
             # Map batch results to original addresses
@@ -365,14 +391,14 @@ def main():
                     print(f"Original Address: {addr}")
                     print(f"Balance: {balances[j]:.8f} BTC" if balances[j] is not None else f"Balance: Unable to retrieve ({balance_errors[j]})")
                     print("-" * 50)
-                    time.sleep(0.05)
+                    time.sleep(0.01)
     else:
         for addr in addresses:
             print(f"Debug: Skipped balance check for {addr} due to conversion failure")
             print(f"Original Address: {addr}")
             print(f"Balance: 0.00000000 BTC")
             print("-" * 50)
-            time.sleep(0.05)
+            time.sleep(0.01)
     
     # Save results and print summary
     save_results(addresses, legacy_addresses, balances, balance_errors, addr_types, statuses)
